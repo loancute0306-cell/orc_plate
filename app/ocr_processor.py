@@ -1,18 +1,18 @@
-import cv2
 import os
 import re
 import time
+import cv2
 import numpy as np
 from typing import List, Tuple
 from paddleocr import PaddleOCR
 
 from .models import PlateDetection, PlateType
-from .utils import resize_image, validate_plate_format, format_plate_number
+from .utils import resize_image, format_plate_number
 
 
 def bbox_to_rect(bbox):
     """
-    Convert PaddleOCR bbox (4 points) to rectangle [x1, y1, x2, y2]
+    Chuyển bbox 4 điểm sang rectangle [x1, y1, x2, y2]
     """
     xs = [int(p[0]) for p in bbox]
     ys = [int(p[1]) for p in bbox]
@@ -20,50 +20,40 @@ def bbox_to_rect(bbox):
 
 
 class TaiwanPlateOCR:
-    def __init__(self, disable_model_check: bool = True):
+    def __init__(self, disable_model_check: bool = True, use_local_model: bool = False, model_dir: str = None):
         if disable_model_check:
             os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
         print("🚀 Initializing PaddleOCR...")
-        self.ocr = PaddleOCR(
-            lang="en",
-            use_angle_cls=False,
-            enable_mkldnn=True,
-        )
-        print("✅ PaddleOCR initialized")
-
-    def clean_plate_text(self, text: str) -> str:
-        if not text:
-            return ""
-
-        text = text.upper().replace(" ", "")
-
-        replacements = {
-            "O": "0",
-            "I": "1",
-            "Z": "2",
-            "S": "5",
-            "B": "8",
-            "Q": "0",
-            "D": "0",
-            "T": "1",
-            "G": "6",
-            "L": "1",
-            "U": "0",
+        ocr_args = {
+            "lang": "en",
+            "use_angle_cls": False,
+            "enable_mkldnn": True,
         }
 
-        for k, v in replacements.items():
-            text = text.replace(k, v)
+        # Nếu dùng model local
+        if use_local_model and model_dir:
+            ocr_args["det_model_dir"] = os.path.join(model_dir, "det")
+            ocr_args["rec_model_dir"] = os.path.join(model_dir, "rec")
 
-        return re.sub(r"[^A-Z0-9-]", "", text)
+        self.ocr = PaddleOCR(**ocr_args)
+        print("✅ PaddleOCR initialized")
+
+    @staticmethod
+    def clean_plate_text(text: str) -> str:
+        """Chuẩn hóa text biển số"""
+        if not text:
+            return ""
+        # Uppercase + remove ký tự lạ
+        text = text.upper()
+        text = re.sub(r"[^A-Z0-9-]", "", text)
+        return text
 
     def process_image(
         self,
         image_path: str,
         max_width: int = 500,
         conf_threshold: float = 0.1,
-        clean_text: bool = True,
-        check_plate_format: bool = True,
     ) -> Tuple[List[PlateDetection], dict]:
 
         start_time = time.time()
@@ -82,54 +72,45 @@ class TaiwanPlateOCR:
             h, w = img.shape[:2]
             image_info["processed_size"] = f"{w}x{h}"
 
-            print(f"🔍 Processing OCR on image: {image_path}")
-            result = self.ocr.ocr(img, cls=False)
+            # OCR
+            result = self.ocr.ocr(img)
 
-            if not result or not result[0]:
-                print("❌ No OCR results")
-                return plates_detected, image_info
+            print(f"📝 OCR raw output for {image_path}:")
+            for line in result:
+                print(line)  # Debug text
 
-            ocr_lines = result[0]
-            print(f"📝 Found {len(ocr_lines)} text regions")
+            for line in result:
+                # Kiểm tra key 'rec_texts'
+                rec_texts = line.get('rec_texts', [])
+                rec_scores = line.get('rec_scores', [])
+                rec_polys = line.get('rec_polys', [])
 
-            for bbox, (text, score) in ocr_lines:
-                if score < conf_threshold:
-                    continue
-
-                raw_text = text
-                cleaned = self.clean_plate_text(text) if clean_text else text.upper()
-                formatted_plate = format_plate_number(cleaned)
-
-                if check_plate_format:
-                    is_valid, plate_type = validate_plate_format(formatted_plate)
-                    if not is_valid:
+                for text, score, poly in zip(rec_texts, rec_scores, rec_polys):
+                    score = float(score)
+                    if score < conf_threshold:
                         continue
-                else:
-                    plate_type = "unknown"
 
-                rect = bbox_to_rect(bbox)
+                    cleaned = self.clean_plate_text(text)
 
-                plates_detected.append(
-                    PlateDetection(
-                        plate_number=formatted_plate,
-                        confidence=float(score),
-                        plate_type=PlateType(plate_type),
-                        raw_text=raw_text,
-                        position=rect,
+                    plates_detected.append(
+                        PlateDetection(
+                            plate_number=format_plate_number(cleaned),
+                            confidence=score,
+                            plate_type=PlateType("unknown"),
+                            raw_text=text,
+                            position=bbox_to_rect(poly),
+                        )
                     )
-                )
-
-                print(f"✅ Detected plate: {formatted_plate} ({score:.3f})")
 
             plates_detected.sort(key=lambda x: x.confidence, reverse=True)
-            print(f"⏱️ Done in {time.time() - start_time:.2f}s")
+            image_info["plates_count"] = len(plates_detected)
+            image_info["processing_time"] = round(time.time() - start_time, 2)
 
             return plates_detected, image_info
 
         except Exception as e:
             print(f"❌ Error processing image: {e}")
             import traceback
-
             traceback.print_exc()
             return plates_detected, image_info
 
@@ -147,27 +128,34 @@ class TaiwanPlateOCR:
                 return []
 
             img = resize_image(img, max_width)
-            result = self.ocr.ocr(img, cls=False)
+            result = self.ocr.ocr(img)
 
-            if not result or not result[0]:
-                return []
+            print("📝 OCR raw output for image bytes:")
+            for line in result:
+                print(line)  # Debug
 
             plates_detected: List[PlateDetection] = []
 
-            for bbox, (text, score) in result[0]:
-                if score < conf_threshold:
+            for line in result:
+                if isinstance(line, dict):
+                    bbox = line.get("position")
+                    text = line.get("text", "")
+                    score = float(line.get("confidence", 0))
+                else:
+                    bbox = line[0]
+                    text, score = line[1]
+                    score = float(score)
+
+                if score < conf_threshold or not text or not bbox:
                     continue
 
                 cleaned = self.clean_plate_text(text)
-                is_valid, plate_type = validate_plate_format(cleaned)
-                if not is_valid:
-                    continue
 
                 plates_detected.append(
                     PlateDetection(
                         plate_number=format_plate_number(cleaned),
-                        confidence=float(score),
-                        plate_type=PlateType(plate_type),
+                        confidence=score,
+                        plate_type=PlateType("unknown"),
                         raw_text=text,
                         position=bbox_to_rect(bbox),
                     )
@@ -177,4 +165,6 @@ class TaiwanPlateOCR:
 
         except Exception as e:
             print(f"❌ Error processing image bytes: {e}")
+            import traceback
+            traceback.print_exc()
             return []
