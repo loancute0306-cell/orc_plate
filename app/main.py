@@ -134,11 +134,11 @@ async def ocr_from_url(
 
         return OCRResponse(
             success=True,
-            message="OCR from URL completed successfully",
+            # message="OCR from URL completed successfully",
             plates_detected=plates_detected,
-            total_plates=len(plates_detected),
+            # total_plates=len(plates_detected),
             processing_time=round(processing_time, 2),
-            image_info={"source_url": image_url}
+            # image_info={"source_url": image_url}
         )
 
     except Exception as e:
