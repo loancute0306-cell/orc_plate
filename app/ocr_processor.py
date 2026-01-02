@@ -77,7 +77,7 @@ class TaiwanPlateOCR:
             
             # Thực hiện OCR
             print(f"🔍 Processing OCR on image: {image_path}")
-            result = self.ocr.predict(img)
+            result = self.ocr.ocr(img, cls=True)
             
             if not result:
                 print("❌ No OCR results")
@@ -163,7 +163,7 @@ class TaiwanPlateOCR:
             img = resize_image(img, max_width)
             
             # Thực hiện OCR
-            result = self.ocr.predict(img)
+            result = self.ocr.ocr(img, cls=True)
             
             if not result:
                 return []
